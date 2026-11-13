@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Slide 自动截图</title>
+<style>
+  :root { --bg:#f6f6f4; --card:#fff; --ink:#1d1d1f; --muted:#6b6b70; --accent:#2b5fd9; --line:#e2e2df; --rec:#d93b2b; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:18px 24px; border-bottom:1px solid var(--line); background:var(--card); display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  h1 { font-size:18px; margin:0 12px 0 0; font-weight:600; }
+  button { font:inherit; font-size:14px; padding:8px 14px; border-radius:8px; border:1px solid var(--line); background:#fff; cursor:pointer; }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button:disabled { opacity:.45; cursor:default; }
+  #status { margin-left:auto; font-size:14px; color:var(--muted); display:flex; align-items:center; gap:8px; }
+  #dot { width:10px; height:10px; border-radius:50%; background:#bbb; }
+  #dot.on { background:var(--rec); animation:pulse 1.4s infinite; }
+  @keyframes pulse { 50% { opacity:.35; } }
+  main { display:grid; grid-template-columns:minmax(320px,1fr) 360px; gap:20px; padding:20px 24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .card h2 { font-size:14px; margin:0 0 10px; color:var(--muted); font-weight:600; }
+  #stage { position:relative; background:#111; border-radius:8px; overflow:hidden; aspect-ratio:16/9; display:flex; align-items:center; justify-content:center; }
+  #stage video { width:100%; height:100%; object-fit:contain; display:block; }
+  #overlay { position:absolute; inset:0; width:100%; height:100%; cursor:crosshair; }
+  #placeholder { position:absolute; color:#aaa; font-size:14px; text-align:center; padding:20px; line-height:1.7; }
+  .hint { font-size:13px; color:var(--muted); line-height:1.6; margin:10px 0 0; }
+  .row { display:flex; align-items:center; gap:10px; margin-top:12px; flex-wrap:wrap; font-size:14px; }
+  input[type=range] { width:140px; }
+  #gallery { display:grid; grid-template-columns:1fr 1fr; gap:10px; max-height:calc(100vh - 170px); overflow:auto; }
+  #gallery figure { margin:0; border:1px solid var(--line); border-radius:6px; overflow:hidden; position:relative; background:#fafafa; }
+  #gallery img { width:100%; display:block; }
+  #gallery figcaption { font-size:12px; color:var(--muted); padding:4px 6px; display:flex; justify-content:space-between; }
+  #gallery .del { border:none; background:none; padding:0 2px; font-size:12px; color:var(--muted); cursor:pointer; }
+  #count { font-weight:600; color:var(--ink); }
+  ol { padding-left:20px; margin:6px 0 0; font-size:13px; line-height:1.8; color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Slide 自动截图</h1>
+  <button id="btnStart" class="primary">① 选择要截的 Zoom 标签页 / 窗口</button>
+  <button id="btnFolder">自动存到文件夹…</button>
+  <button id="btnStop" disabled>停止</button>
+  <button id="btnPdf" disabled>下载 PDF</button>
+  <span id="status"><span id="dot"></span><span id="statusText">未开始</span></span>
+</header>
+
+<main>
+  <section class="card">
+    <h2>画面预览（拖动鼠标框出 slide 区域，不框就截整个画面）</h2>
+    <div id="stage">
+      <div id="placeholder">
+        点上面的 ① 按钮，在弹窗里选：<br>
+        <b>“Chrome 标签页”</b> → Zoom 网页版所在的标签页<br>
+        或 <b>“窗口”</b> → Zoom 桌面客户端<br>
+        选好后这个页面可以放到后台，切去做别的事
+      </div>
+      <video id="video" muted playsinline></video>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div class="row">
+      <label>灵敏度
+        <input id="sens" type="range" min="0.3" max="5" step="0.1" value="1">
+        <span id="sensVal">1.0%</span>
+      </label>
+      <label><input id="dedupe" type="checkbox" checked> 翻回旧页不重复存</label>
+      <button id="btnClearCrop">清除框选</button>
+    </div>
+    <p class="hint">
+      灵敏度 = 画面有多少比例变化才算换页。逐条出现的要点没截到 → 调小；人像视频/鼠标老是误触发 → 调大，或框选时避开视频区域。
+    </p>
+    <ol>
+      <li>选标签页时，Zoom 那个标签页<b>不用在最前面</b>，切到别的标签页也照样截。</li>
+      <li>选窗口时，Zoom 窗口被别的窗口挡住没关系，但<b>不要最小化</b>（最小化后 Windows 不再绘制画面）。</li>
+      <li>这个截图页面本身也不要关掉。点“自动存到文件夹”后，每张会立即存盘，万一浏览器崩了也不丢。</li>
+    </ol>
+  </section>
+
+  <aside class="card">
+    <h2>已截取 <span id="count">0</span> 张</h2>
+    <div id="gallery"></div>
+  </aside>
+</main>
+
+<script>
+(() => {
+  // ---------- 参数 ----------
+  const THUMB_W = 320, PIXEL_DIFF = 20, DEDUPE_THR = 0.003, STABLE_THR = 0.002, STABLE_CHECKS = 2, INTERVAL_MS = 1000;
+
+  const $ = id => document.getElementById(id);
+  const video = $('video'), overlay = $('overlay'), octx = overlay.getContext('2d');
+
+  let stream = null, track = null, reader = null, latestFrame = null, timerWorker = null;
+  let crop = null;                // {x,y,w,h} 以 0~1 表示
+  let dirHandle = null;
+  const slides = [];              // {blob, url, time}
+  let busy = false;
+
+  // ---------- 换页检测 ----------
+  const det = { current:null, saved:[], candidate:null, stable:0 };
+  function changedFraction(a, b) {
+    if (!a || !b || a.length !== b.length) return 1;
+    let n = 0;
+    for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > PIXEL_DIFF) n++;
+    return n / a.length;
+  }
+  function isBlank(t) {
+    let s = 0, s2 = 0;
+    for (const v of t) { s += v; s2 += v * v; }
+    const m = s / t.length;
+    return Math.sqrt(Math.max(0, s2 / t.length - m * m)) < 3;
+  }
+  function feed(t) {
+    const thr = parseFloat($('sens').value) / 100;
+    if (det.current && changedFraction(t, det.current) < thr) { det.candidate = null; det.stable = 0; return false; }
+    if (det.candidate && changedFraction(t, det.candidate) < STABLE_THR) det.stable++;
+    else { det.candidate = t; det.stable = 0; }
+    if (det.stable + 1 < STABLE_CHECKS) return false;
+    det.current = t; det.candidate = null; det.stable = 0;
+    if ($('dedupe').checked && det.saved.some(s => changedFraction(t, s) < Math.min(thr, DEDUPE_THR))) return false;
+    if (isBlank(t)) return false;
+    det.saved.push(t);
+    return true;
+  }
+
+  // ---------- 取帧 ----------
+  // 用 MediaStreamTrackProcessor 持续读帧：页面在后台也照样收到画面
+  async function pumpFrames() {
+    const proc = new MediaStreamTrackProcessor({ track });
+    reader = proc.readable.getReader();
+    while (true) {
+      const { value, done } = await reader.read().catch(() => ({ done:true }));
+      if (done) break;
+      if (latestFrame) latestFrame.close();
+      latestFrame = value;
+    }
+  }
+  function sourceSize() {
+    if (latestFrame) return [latestFrame.displayWidth, latestFrame.displayHeight];
+    return [video.videoWidth, video.videoHeight];
+  }
+  function drawSource(ctx, sx, sy, sw, sh, dw, dh) {
+    ctx.drawImage(latestFrame || video, sx, sy, sw, sh, 0, 0, dw, dh);
+  }
+  function cropRect() {
+    const [W, H] = sourceSize();
+    if (!W || !H) return null;
+    const c = crop || { x:0, y:0, w:1, h:1 };
+    return [Math.round(c.x * W), Math.round(c.y * H), Math.max(1, Math.round(c.w * W)), Math.max(1, Math.round(c.h * H))];
+  }
+
+  const tCanvas = new OffscreenCanvas(THUMB_W, 90);
+  const tctx = tCanvas.getContext('2d', { willReadFrequently:true });
+  function makeThumb(r) {
+    const [sx, sy, sw, sh] = r;
+    const th = Math.max(1, Math.round(sh * THUMB_W / sw));
+    if (tCanvas.height !== th) tCanvas.height = th;
+    drawSource(tctx, sx, sy, sw, sh, THUMB_W, th);
+    const d = tctx.getImageData(0, 0, THUMB_W, th).data;
+    const g = new Uint8Array(THUMB_W * th);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) g[j] = (d[i] * 299 + d[i+1] * 587 + d[i+2] * 114) / 1000;
+    return g;
+  }
+  async function fullImage(r) {
+    const [sx, sy, sw, sh] = r;
+    const c = new OffscreenCanvas(sw, sh);
+    drawSource(c.getContext('2d'), sx, sy, sw, sh, sw, sh);
+    return c.convertToBlob({ type:'image/png' });
+  }
+
+  async function tick() {
+    if (busy || !track || track.readyState !== 'live') return;
+    busy = true;
+    try {
+      const r = cropRect();
+      if (r && feed(makeThumb(r))) await addSlide(await fullImage(r));
+    } catch (e) { console.error(e); }
+    busy = false;
+  }
+
+  // ---------- 保存 ----------
+  const pad = n => String(n).padStart(3, '0');
+  async function addSlide(blob) {
+    const s = { blob, url:URL.createObjectURL(blob), time:new Date() };
+    slides.push(s);
+    const n = slides.length;
+    if (dirHandle) {
+      try {
+        const fh = await dirHandle.getFileHandle(`slide_${pad(n)}.png`, { create:true });
+        const w = await fh.createWritable(); await w.write(blob); await w.close();
+      } catch (e) { console.warn('写入文件夹失败', e); }
+    }
+    renderGallery();
+    setStatus(true, `截图中 · 最新：第 ${n} 张 ${s.time.toLocaleTimeString()}`);
+    document.title = `(${n}) Slide 自动截图`;
+  }
+  function renderGallery() {
+    const g = $('gallery'); g.innerHTML = '';
+    slides.forEach((s, i) => {
+      const f = document.createElement('figure');
+      f.innerHTML = `<a href="${s.url}" download="slide_${pad(i+1)}.png"><img src="${s.url}"></a>
+        <figcaption><span>#${i+1} · ${s.time.toLocaleTimeString()}</span><button class="del" title="删除">✕</button></figcaption>`;
+      f.querySelector('.del').onclick = () => { URL.revokeObjectURL(s.url); slides.splice(i, 1); renderGallery(); };
+      g.prepend(f);
+    });
+    $('count').textContent = slides.length;
+    $('btnPdf').disabled = !slides.length;
+  }
+
+  // ---------- 开始 / 停止 ----------
+  function setStatus(on, text) { $('dot').classList.toggle('on', on); $('statusText').textContent = text; }
+
+  $('btnStart').onclick = async () => {
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video:{ frameRate:{ ideal:5, max:10 } }, audio:false,
+        selfBrowserSurface:'exclude', surfaceSwitching:'include', preferCurrentTab:false
+      });
+    } catch (e) { console.log("gdm err", e.name, e.message); setStatus(false, "已取消选择"); return; }
+    track = stream.getVideoTracks()[0];
+    video.srcObject = stream; video.play();
+    $('placeholder').style.display = 'none';
+    det.current = det.candidate = null; det.stable = 0;
+    if ('MediaStreamTrackProcessor' in window) pumpFrames();
+
+    // Worker 里的计时器不会因为页面在后台而被浏览器降频
+    const src = `setInterval(() => postMessage(0), ${INTERVAL_MS});`;
+    timerWorker = new Worker(URL.createObjectURL(new Blob([src], { type:'text/javascript' })));
+    timerWorker.onmessage = tick;
+
+    track.addEventListener('ended', stop);
+    $('btnStart').disabled = true; $('btnStop').disabled = false;
+    setStatus(true, '截图中…（可以把这个页面放到后台）');
+  };
+
+  function stop() {
+    if (timerWorker) { timerWorker.terminate(); timerWorker = null; }
+    if (reader) { reader.cancel().catch(() => {}); reader = null; }
+    if (latestFrame) { latestFrame.close(); latestFrame = null; }
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = track = null;
+    $('btnStart').disabled = false; $('btnStop').disabled = true;
+    setStatus(false, `已停止 · 共 ${slides.length} 张`);
+  }
+  $('btnStop').onclick = stop;
+
+  $('btnFolder').onclick = async () => {
+    if (!window.showDirectoryPicker) { alert('当前浏览器不支持自动存文件夹，请用 Chrome 或 Edge。'); return; }
+    try {
+      dirHandle = await window.showDirectoryPicker({ mode:'readwrite' });
+      $('btnFolder').textContent = `保存到：${dirHandle.name}`;
+      // 把已截的也补存进去
+      for (let i = 0; i < slides.length; i++) {
+        const fh = await dirHandle.getFileHandle(`slide_${pad(i+1)}.png`, { create:true });
+        const w = await fh.createWritable(); await w.write(slides[i].blob); await w.close();
+      }
+    } catch (e) { /* 取消 */ }
+  };
+
+  // ---------- 框选 ----------
+  function videoBox() {
+    const W = overlay.clientWidth, H = overlay.clientHeight;
+    const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
+    const s = Math.min(W / vw, H / vh), w = vw * s, h = vh * s;
+    return { x:(W - w) / 2, y:(H - h) / 2, w, h };
+  }
+  function drawOverlay(tmp) {
+    overlay.width = overlay.clientWidth; overlay.height = overlay.clientHeight;
+    octx.clearRect(0, 0, overlay.width, overlay.height);
+    const c = tmp || crop; if (!c) return;
+    const b = videoBox();
+    const x = b.x + c.x * b.w, y = b.y + c.y * b.h, w = c.w * b.w, h = c.h * b.h;
+    octx.fillStyle = 'rgba(0,0,0,.5)';
+    octx.fillRect(0, 0, overlay.width, overlay.height);
+    octx.clearRect(x, y, w, h);
+    octx.strokeStyle = '#ff4d3a'; octx.lineWidth = 2; octx.strokeRect(x, y, w, h);
+  }
+  let dragStart = null;
+  const norm = e => {
+    const r = overlay.getBoundingClientRect(), b = videoBox();
+    return { x:Math.min(1, Math.max(0, (e.clientX - r.left - b.x) / b.w)), y:Math.min(1, Math.max(0, (e.clientY - r.top - b.y) / b.h)) };
+  };
+  const rectOf = (a, b) => ({ x:Math.min(a.x, b.x), y:Math.min(a.y, b.y), w:Math.abs(a.x - b.x), h:Math.abs(a.y - b.y) });
+  overlay.addEventListener('pointerdown', e => { if (!stream) return; dragStart = norm(e); overlay.setPointerCapture(e.pointerId); });
+  overlay.addEventListener('pointermove', e => { if (dragStart) drawOverlay(rectOf(dragStart, norm(e))); });
+  overlay.addEventListener('pointerup', e => {
+    if (!dragStart) return;
+    const r = rectOf(dragStart, norm(e)); dragStart = null;
+    if (r.w > 0.03 && r.h > 0.03) { crop = r; det.current = det.candidate = null; det.saved = []; }
+    drawOverlay();
+  });
+  $('btnClearCrop').onclick = () => { crop = null; det.current = null; det.saved = []; drawOverlay(); };
+  window.addEventListener('resize', () => drawOverlay());
+  $('sens').oninput = () => $('sensVal').textContent = parseFloat($('sens').value).toFixed(1) + '%';
+
+  // ---------- 导出 PDF（无需第三方库） ----------
+  async function toJpeg(blob) {
+    const bmp = await createImageBitmap(blob);
+    const c = new OffscreenCanvas(bmp.width, bmp.height);
+    c.getContext('2d').drawImage(bmp, 0, 0);
+    const jb = await c.convertToBlob({ type:'image/jpeg', quality:0.92 });
+    return { w:bmp.width, h:bmp.height, data:new Uint8Array(await jb.arrayBuffer()) };
+  }
+  async function buildPdf(blobs) {
+    const enc = new TextEncoder(), parts = [], offsets = [];
+    let len = 0;
+    const push = x => { const b = typeof x === 'string' ? enc.encode(x) : x; parts.push(b); len += b.length; };
+    const imgs = []; for (const b of blobs) imgs.push(await toJpeg(b));
+    const n = imgs.length, pageIds = imgs.map((_, i) => 3 + i * 3);
+    push('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n');
+    const obj = (id, body) => { offsets[id] = len; push(`${id} 0 obj\n`); body(); push('\nendobj\n'); };
+    obj(1, () => push('<< /Type /Catalog /Pages 2 0 R >>'));
+    obj(2, () => push(`<< /Type /Pages /Count ${n} /Kids [${pageIds.map(id => id + ' 0 R').join(' ')}] >>`));
+    imgs.forEach((im, i) => {
+      const p = 3 + i * 3, img = p + 1, cs = p + 2;
+      obj(p, () => push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${im.w} ${im.h}] /Resources << /XObject << /Im0 ${img} 0 R >> >> /Contents ${cs} 0 R >>`));
+      obj(img, () => { push(`<< /Type /XObject /Subtype /Image /Width ${im.w} /Height ${im.h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${im.data.length} >>\nstream\n`); push(im.data); push('\nendstream'); });
+      const content = `q ${im.w} 0 0 ${im.h} 0 0 cm /Im0 Do Q`;
+      obj(cs, () => push(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`));
+    });
+    const total = 3 + n * 3, xref = len;
+    let x = `xref\n0 ${total}\n0000000000 65535 f \n`;
+    for (let i = 1; i < total; i++) x += String(offsets[i]).padStart(10, '0') + ' 00000 n \n';
+    push(x + `trailer\n<< /Size ${total} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`);
+    return new Blob(parts, { type:'application/pdf' });
+  }
+  $('btnPdf').onclick = async () => {
+    $('btnPdf').disabled = true; $('btnPdf').textContent = '生成中…';
+    try {
+      const pdf = await buildPdf(slides.map(s => s.blob));
+      const name = `slides_${new Date().toISOString().slice(0,16).replace(/[-:T]/g, '')}.pdf`;
+      if (dirHandle) {
+        const fh = await dirHandle.getFileHandle(name, { create:true });
+        const w = await fh.createWritable(); await w.write(pdf); await w.close();
+      }
+      const a = document.createElement('a'); a.href = URL.createObjectURL(pdf); a.download = name; a.click();
+    } finally { $('btnPdf').disabled = false; $('btnPdf').textContent = '下载 PDF'; }
+  };
+
+  window.addEventListener('beforeunload', e => { if (slides.length && !dirHandle) { e.preventDefault(); e.returnValue = ''; } });
+})();
+</script>
+</body>
+</html>
